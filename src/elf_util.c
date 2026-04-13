@@ -384,7 +384,7 @@ static bool elfutil_unpack_android_relocs(const struct elf_image *elf, struct an
         LOGF("REL relocations should not have addends, but found one in group %llu", (unsigned long long)i);
     }
 
-    for (size_t i = 0; i < group_size; i++) {
+    for (size_t j = 0; j < group_size; j++) {
       if (group_flags & RELOCATION_GROUPED_BY_OFFSET_DELTA_FLAG) {
         current_offset += group_r_offset_delta;
       } else {
