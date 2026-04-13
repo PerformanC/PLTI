@@ -68,9 +68,21 @@ static int elfutil_phdr_callback(struct dl_phdr_info *info, size_t size, void *d
 
   struct plti_phdr_cb_info *cb_info = (struct plti_phdr_cb_info *)data;
   /* TODO: Not use strstr, only check the basename (tho not use that function, as it is unavailable starting from SDK 24) */
-  if (!strstr(info->dlpi_name, cb_info->lib_name)) return 0;
+  if (!info->dlpi_name || !strstr(info->dlpi_name, cb_info->lib_name)) return 0;
 
-  if (!plti_add_manual_lib(cb_info->ctx, info->dlpi_name, (void *)info->dlpi_addr)) {
+  /* INFO: When the p_vaddr is different from 0, the ELF header is located
+             at dlpi_addr + p_vaddr of the first PT_LOAD segment with p_offset == 0.
+             Otherwise, the ELF header is located at dlpi_addr. */
+  uintptr_t ehdr_addr = (uintptr_t)info->dlpi_addr;
+  for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
+    if (info->dlpi_phdr[i].p_type != PT_LOAD || info->dlpi_phdr[i].p_offset != 0) continue;
+
+    ehdr_addr += (uintptr_t)info->dlpi_phdr[i].p_vaddr;
+
+    break;
+  }
+
+  if (!plti_add_manual_lib(cb_info->ctx, info->dlpi_name, (void *)ehdr_addr)) {
     LOGE("Failed to add library from dl_iterate_phdr callback: %s", info->dlpi_name);
 
     return -1;
