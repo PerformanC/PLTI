@@ -7,4 +7,5 @@
 !.gitignore
 !CMakeLists.txt
 !LICENSE
+!Makefile
 !README.md
