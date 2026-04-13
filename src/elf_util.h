@@ -44,10 +44,9 @@ struct elf_image {
   bool rel_plt_is_rela_;
   bool rel_dyn_is_rela_;
   bool rel_android_is_rela_;
-  bool valid_;
 };
 
-void elfutil_init(struct elf_image *elf, uintptr_t base_addr);
+bool elfutil_init(struct elf_image *elf, uintptr_t base_addr);
 
 size_t elfutil_find_plt_addr(const struct elf_image *elf, const char *name, uintptr_t **out_addrs);
 

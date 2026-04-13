@@ -33,10 +33,8 @@ struct plti_phdr_cb_info {
 
 bool plti_add_manual_lib(struct plti *ctx, const char *lib_path, void *base_addr) {
   struct elf_image image;
-  elfutil_init(&image, (uintptr_t)base_addr);
-
-  if (!image.valid_) {
-    LOGE("Failed to parse ELF image for library: %s", lib_path);
+  if (!elfutil_init(&image, (uintptr_t)base_addr)) {
+    LOGE("Failed to initialize ELF image for library: %s", lib_path);
 
     return false;
   }

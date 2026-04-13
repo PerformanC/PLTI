@@ -19,22 +19,37 @@
 #endif
 
 #if defined(__arm__)
+  #define ELF_CLASS ELFCLASS32
+  #define ELF_MACHINE EM_ARM
+
   #define ELF_R_GENERIC_JUMP_SLOT R_ARM_JUMP_SLOT  /* INFO: .rel.plt */
   #define ELF_R_GENERIC_GLOB_DAT R_ARM_GLOB_DAT    /* INFO: .rel.dyn */
   #define ELF_R_GENERIC_ABS R_ARM_ABS32            /* INFO: .rel.dyn */
 #elif defined(__aarch64__)
+  #define ELF_CLASS ELFCLASS64
+  #define ELF_MACHINE EM_AARCH64
+
   #define ELF_R_GENERIC_JUMP_SLOT R_AARCH64_JUMP_SLOT
   #define ELF_R_GENERIC_GLOB_DAT R_AARCH64_GLOB_DAT
   #define ELF_R_GENERIC_ABS R_AARCH64_ABS64
 #elif defined(__i386__)
+  #define ELF_CLASS ELFCLASS32
+  #define ELF_MACHINE EM_386
+
   #define ELF_R_GENERIC_JUMP_SLOT R_386_JMP_SLOT
   #define ELF_R_GENERIC_GLOB_DAT R_386_GLOB_DAT
   #define ELF_R_GENERIC_ABS R_386_32
 #elif defined(__x86_64__)
+  #define ELF_CLASS ELFCLASS64
+  #define ELF_MACHINE EM_X86_64
+
   #define ELF_R_GENERIC_JUMP_SLOT R_X86_64_JUMP_SLOT
   #define ELF_R_GENERIC_GLOB_DAT R_X86_64_GLOB_DAT
   #define ELF_R_GENERIC_ABS R_X86_64_64
 #elif defined(__riscv)
+  #define ELF_CLASS ELFCLASS64
+  #define ELF_MACHINE EM_RISCV
+
   #define ELF_R_GENERIC_JUMP_SLOT R_RISCV_JUMP_SLOT
   #define ELF_R_GENERIC_GLOB_DAT R_RISCV_64
   #define ELF_R_GENERIC_ABS R_RISCV_64
@@ -99,54 +114,34 @@ static bool set_by_offset(ElfW(Addr) *ptr, ElfW(Addr) base, ElfW(Addr) bias, Elf
   return false;
 }
 
-void elfutil_init(struct elf_image *elf, uintptr_t base_addr) {
+bool elfutil_init(struct elf_image *elf, uintptr_t base_addr) {
   memset(elf, 0, sizeof(*elf));
 
   elf->header_ = (ElfW(Ehdr) *)base_addr;
   elf->base_addr_ = base_addr;
 
   /* INFO: check magic */
-  if (0 != memcmp(elf->header_->e_ident, ELFMAG, SELFMAG)) return;
+  if (0 != memcmp(elf->header_->e_ident, ELFMAG, SELFMAG)) return false;
 
   /* INFO: check class (64/32) */
-  #ifdef __LP64__
-    if (ELFCLASS64 != elf->header_->e_ident[EI_CLASS]) return;
-  #else
-    if (ELFCLASS32 != elf->header_->e_ident[EI_CLASS]) return;
-  #endif
+  if (ELF_CLASS != elf->header_->e_ident[EI_CLASS]) return false;
 
   /* INFO: check endian (little/big) */
-  if (ELFDATA2LSB != elf->header_->e_ident[EI_DATA]) return;
+  if (ELFDATA2LSB != elf->header_->e_ident[EI_DATA]) return false;
 
   /* INFO: check version */
-  if (EV_CURRENT != elf->header_->e_ident[EI_VERSION]) return;
+  if (EV_CURRENT != elf->header_->e_ident[EI_VERSION]) return false;
 
   /* INFO: check type */
-  if (ET_EXEC != elf->header_->e_type && ET_DYN != elf->header_->e_type) return;
+  if (ET_EXEC != elf->header_->e_type && ET_DYN != elf->header_->e_type) return false;
 
   /* INFO: check machine */
-  #if defined(__arm__)
-    if (EM_ARM != elf->header_->e_machine) return;
-  #elif defined(__aarch64__)
-    if (EM_AARCH64 != elf->header_->e_machine) return;
-  #elif defined(__i386__)
-    if (EM_386 != elf->header_->e_machine) return;
-  #elif defined(__x86_64__)
-    if (EM_X86_64 != elf->header_->e_machine) return;
-  #elif defined(__riscv)
-    if (EM_RISCV != elf->header_->e_machine) return;
-  #else
-    LOGE("Unsupported architecture: %s", ELF_MACHINE_NAME(elf->header_->e_machine));
-
-    return;
-  #endif
+  if (ELF_MACHINE != elf->header_->e_machine) return false;
 
   if (elf->header_->e_version != EV_CURRENT) {
     LOGE("Unsupported ELF version: %d", elf->header_->e_version);
 
-    elf->valid_ = false;
-
-    return;
+    return false;
   }
 
   elf->program_header_ = (ElfW(Phdr) *)((uintptr_t)elf->header_ + elf->header_->e_phoff);
@@ -168,9 +163,7 @@ void elfutil_init(struct elf_image *elf, uintptr_t base_addr) {
   if (!elf->dynamic_) {
     LOGE("Failed to find dynamic section or bias address in ELF header");
 
-    elf->valid_ = false;
-
-    return;
+    return false;
   }
 
   elf->dynamic_ = (ElfW(Dyn) *)(elf->bias_addr_ + (uintptr_t)elf->dynamic_);
@@ -183,12 +176,12 @@ void elfutil_init(struct elf_image *elf, uintptr_t base_addr) {
         break;
       }
       case DT_STRTAB: {
-        if (!set_by_offset((ElfW(Addr) *)&elf->dyn_str_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        if (!set_by_offset((ElfW(Addr) *)&elf->dyn_str_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return false;
 
         break;
       }
       case DT_SYMTAB: {
-        if (!set_by_offset((ElfW(Addr) *)&elf->dyn_sym_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        if (!set_by_offset((ElfW(Addr) *)&elf->dyn_sym_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return false;
 
         break;
       }
@@ -198,7 +191,7 @@ void elfutil_init(struct elf_image *elf, uintptr_t base_addr) {
         break;
       }
       case DT_JMPREL: {
-        if (!set_by_offset((ElfW(Addr) *)&elf->rel_plt_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        if (!set_by_offset((ElfW(Addr) *)&elf->rel_plt_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return false;
 
         break;
       }
@@ -208,13 +201,13 @@ void elfutil_init(struct elf_image *elf, uintptr_t base_addr) {
         break;
       }
       case DT_REL: {
-        if (!set_by_offset((ElfW(Addr) *)&elf->rel_dyn_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        if (!set_by_offset((ElfW(Addr) *)&elf->rel_dyn_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return false;
         elf->rel_dyn_is_rela_ = false;
 
         break;
       }
       case DT_RELA: {
-        if (!set_by_offset((ElfW(Addr) *)&elf->rel_dyn_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        if (!set_by_offset((ElfW(Addr) *)&elf->rel_dyn_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return false;
         elf->rel_dyn_is_rela_ = true;
 
         break;
@@ -226,13 +219,13 @@ void elfutil_init(struct elf_image *elf, uintptr_t base_addr) {
         break;
       }
       case DT_ANDROID_REL: {
-        if (!set_by_offset((ElfW(Addr) *)&elf->rel_android_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        if (!set_by_offset((ElfW(Addr) *)&elf->rel_android_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return false;
         elf->rel_android_is_rela_ = false;
 
         break;
       }
       case DT_ANDROID_RELA: {
-        if (!set_by_offset((ElfW(Addr) *)&elf->rel_android_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return;
+        if (!set_by_offset((ElfW(Addr) *)&elf->rel_android_, elf->base_addr_, elf->bias_addr_, dynamic->d_un.d_ptr)) return false;
         elf->rel_android_is_rela_ = true;
 
         break;
@@ -274,13 +267,13 @@ void elfutil_init(struct elf_image *elf, uintptr_t base_addr) {
   if (0 != elf->rel_android_) {
     const char *rel = (const char *)elf->rel_android_;
     if (elf->rel_android_size_ < 4 || rel[0] != 'A' || rel[1] != 'P' || rel[2] != 'S' || rel[3] != '2')
-      return;
+      return false;
 
     elf->rel_android_ += 4;
     elf->rel_android_size_ -= 4;
   }
 
-  elf->valid_ = true;
+  return true;
 }
 
 bool elfutil_get_addr_protection(const struct elf_image *elf, uintptr_t addr, int *out_prot) {
