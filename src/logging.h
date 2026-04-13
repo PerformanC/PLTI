@@ -3,7 +3,7 @@
 
 #include <android/log.h>
 
-#if 1
+#ifdef PLTI_LOGGING
     #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "PLTI", __VA_ARGS__)
     #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "PLTI", __VA_ARGS__)
     #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  "PLTI", __VA_ARGS__)

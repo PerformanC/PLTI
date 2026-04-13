@@ -14,12 +14,21 @@ target_include_directories(plti PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+  target_compile_definitions(plti PRIVATE PLTI_LOGGING)
+endif()
+
 target_link_libraries(plti PRIVATE
   log
   dl
 )
 
 target_compile_options(plti PRIVATE
+  -Wpedantic
   -Wall
   -Wextra
+  -Werror
+  -Wformat
+  -Wuninitialized
+  -Wshadow 
 )
