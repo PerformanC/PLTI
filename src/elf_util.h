@@ -1,5 +1,5 @@
-#ifndef LSPLT_ELF_UTIL_H
-#define LSPLT_ELF_UTIL_H
+#ifndef PLTI_ELF_UTIL_H
+#define PLTI_ELF_UTIL_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -54,4 +54,4 @@ size_t elfutil_find_plt_addr_by_prefix(const struct elf_image *elf, const char *
 
 bool elfutil_get_addr_protection(const struct elf_image *elf, uintptr_t addr, int *out_prot);
 
-#endif /* LSPLT_ELF_UTIL_H */
+#endif /* PLTI_ELF_UTIL_H */
