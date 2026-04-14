@@ -30,5 +30,6 @@ target_compile_options(plti PRIVATE
   -Werror
   -Wformat
   -Wuninitialized
-  -Wshadow 
+  -Wshadow
+  -Wno-variadic-macros
 )
