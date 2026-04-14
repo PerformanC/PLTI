@@ -10,7 +10,7 @@ add_library(plti SHARED
   src/plti.c
 )
 
-target_include_directories(plti PRIVATE
+target_include_directories(plti PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
