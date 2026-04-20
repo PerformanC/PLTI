@@ -188,6 +188,8 @@ bool plti_add_hook(struct plti *ctx, const char *lib_name, const char *name, voi
   return plti_internal_add_hook(ctx, lib_name, name, false, new_callback, backup);
 }
 
+/* WARN: We should only allow one hook per symbol, considering that multiple hooks WILL lead
+           to (at least) one of the original addresses being lost */
 bool plti_add_hook_by_prefix(struct plti *ctx, const char *lib_name, const char *name_prefix, void *new_callback, void **backup) {
   return plti_internal_add_hook(ctx, lib_name, name_prefix, true, new_callback, backup);
 }
