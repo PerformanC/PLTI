@@ -8,7 +8,6 @@
 struct elf_image {
   ElfW(Addr) base_addr_;
   ElfW(Addr) bias_addr_;
-  const char *path_;
 
   ElfW(Ehdr) *header_;
   ElfW(Phdr) *program_header_;

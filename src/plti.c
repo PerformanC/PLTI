@@ -31,7 +31,7 @@ struct plti_phdr_cb_info {
   const char *lib_name;
 };
 
-bool plti_add_manual_lib(struct plti *ctx, const char *lib_path, void *base_addr) {
+bool plti_add_manual_lib(struct plti *ctx, const char *lib_path, uintptr_t base_addr) {
   struct elf_image image;
   if (!elfutil_init(&image, (uintptr_t)base_addr)) {
     LOGE("Failed to initialize ELF image for library: %s", lib_path);
@@ -80,7 +80,7 @@ static int elfutil_phdr_callback(struct dl_phdr_info *info, size_t size, void *d
     break;
   }
 
-  if (!plti_add_manual_lib(cb_info->ctx, info->dlpi_name, (void *)ehdr_addr)) {
+  if (!plti_add_manual_lib(cb_info->ctx, info->dlpi_name, ehdr_addr)) {
     LOGE("Failed to add library from dl_iterate_phdr callback: %s", info->dlpi_name);
 
     return -1;
@@ -106,8 +106,33 @@ bool plti_add_lib(struct plti *ctx, const char *lib_name) {
   return true;
 }
 
-static void *page_start(void *addr) {
-  return (void *)((uintptr_t)addr & ~(getpagesize() - 1));
+static void *page_start(uintptr_t addr) {
+  return (void *)(addr & ~(getpagesize() - 1));
+}
+
+static bool plti_internal_set_got_entry(struct elf_image *elf, uintptr_t got_addr, void *new_val) {
+  int restore_prot = 0;
+  if (!elfutil_get_addr_protection(elf, got_addr, &restore_prot)) {
+    LOGE("Failed to infer memory protection for GOT entry at 0x%" PRIxPTR, got_addr);
+
+    return false;
+  }
+
+  if (mprotect(page_start(got_addr), getpagesize(), restore_prot | PROT_WRITE) == -1) {
+    LOGE("Failed to change memory protection for GOT entry at 0x%" PRIxPTR, got_addr);
+
+    return false;
+  }
+
+  *((uintptr_t *)got_addr) = (uintptr_t)new_val;
+
+  if (mprotect(page_start(got_addr), getpagesize(), restore_prot) == -1) {
+    LOGE("Failed to restore memory protection for GOT entry at 0x%" PRIxPTR, got_addr);
+
+    return false;
+  }
+
+  return true;
 }
 
 static bool plti_internal_add_hook(struct plti *ctx, const char *lib_name, const char *name, bool by_prefix, void *new_callback, void **backup) {
@@ -140,38 +165,54 @@ static bool plti_internal_add_hook(struct plti *ctx, const char *lib_name, const
     return false;
   }
 
+  /* INFO: Early check, so that if it fails, we will be clean (hookless) */
+  struct plti_hook *new_hooks = (struct plti_hook *)realloc(ctx->hooks, (ctx->hook_count + plt_addr_count) * sizeof(struct plti_hook));
+  if (!new_hooks) {
+    LOGE("Failed to reallocate hooks array");
+
+    free(plt_addrs);
+
+    return false;
+  }
+  ctx->hooks = new_hooks;
+
+  for (size_t i = 0; i < plt_addr_count; i++) {
+    ctx->hooks[ctx->hook_count].lib_name = strdup(lib_name);
+    if (!ctx->hooks[ctx->hook_count].lib_name) {
+      LOGE("Failed to duplicate library name for hook %s in library %s", name, lib_name);
+
+      free(plt_addrs);
+
+      return false;
+    }
+
+    ctx->hooks[ctx->hook_count].name = strdup(name);
+    if (!ctx->hooks[ctx->hook_count].name) {
+      LOGE("Failed to duplicate hook name for hook %s in library %s", name, lib_name);
+
+      free(plt_addrs);
+
+      return false;
+    }
+
+    ctx->hooks[ctx->hook_count].address = (void *)plt_addrs[i];
+    ctx->hook_count++;
+  }
+
   for (size_t i = 0; i < plt_addr_count; i++) {
     uintptr_t plt_addr = plt_addrs[i];
     if (!plt_addr) continue;
 
-    /* INFO: backup must keep the original target function pointer stored in the GOT/PLT slot.
-          Keeping the slot address itself (previous behavior) makes callers branch into data,
-          which can crash with SIGILL (ILL_ILLOPC). */
-    uintptr_t original_callback = *((uintptr_t *)plt_addr);
-    if (backup && *backup == NULL) *backup = (void *)original_callback;
-
-    /* INFO: Write new callback to PLT entry */
-    int restore_prot = 0;
-    if (!elfutil_get_addr_protection(target_image, plt_addr, &restore_prot)) {
-      LOGE("Failed to infer memory protection for PLT entry at 0x%" PRIxPTR, plt_addr);
-
-      free(plt_addrs);
-
-      return false;
+    if (backup && *backup == NULL) {
+      /* INFO: backup must keep the original target function pointer stored in the GOT/PLT slot.
+                Keeping the slot address itself (previous behavior) makes callers branch into data,
+                which can crash with SIGILL (ILL_ILLOPC). */
+      uintptr_t original_callback = *((uintptr_t *)plt_addr);
+      *backup = (void *)original_callback;
     }
 
-    if (mprotect(page_start((void *)plt_addr), getpagesize(), restore_prot | PROT_WRITE) == -1) {
-      LOGE("Failed to change memory protection for PLT entry at 0x%" PRIxPTR, plt_addr);
-
-      free(plt_addrs);
-
-      return false;
-    }
-
-    *((uintptr_t *)plt_addr) = (uintptr_t)new_callback;
-
-    if (mprotect(page_start((void *)plt_addr), getpagesize(), restore_prot) == -1) {
-      LOGE("Failed to restore memory protection for PLT entry at 0x%" PRIxPTR, plt_addr);
+    if (!plti_internal_set_got_entry(target_image, plt_addr, new_callback)) {
+      LOGE("Failed to set GOT entry for PLT hook at 0x%" PRIxPTR, plt_addr);
 
       free(plt_addrs);
 
@@ -196,29 +237,108 @@ bool plti_add_hook_by_prefix(struct plti *ctx, const char *lib_name, const char 
 
 /* TODO: Add by suffix? */
 
-bool plti_remove_hook(struct plti *ctx, const char *lib_name, const char *name, void **backup) {
-  if (!backup || *backup == NULL) {
-    LOGE("Backup pointer is NULL for hook %s in library %s", name, lib_name);
+/* TODO: Perhaps: When registering hooks by prefix, add their full name to the array, and de-registering will only
+           remove those targets. For now, removing any that matches so, even manual, is very acceptable. */
+static bool plti_internal_remove_hook(struct plti *ctx, const char *lib_name, const char *name, void *original_callback) {
+  struct elf_image *target_image = NULL;
+  for (size_t i = 0; i < ctx->elf_image_count; i++) {
+    if (!strstr(ctx->elf_infos[i].path, lib_name)) continue;
+
+    target_image = &ctx->elf_infos[i].elf;
+
+    break;
+  }
+
+  if (!target_image) {
+    LOGE("Failed to find ELF image for library for removing hook %s: %s", name, lib_name);
 
     return false;
   }
 
-  return plti_add_hook(ctx, lib_name, name, *backup, NULL);
+  /* INFO: To avoid runtime memory issues to leave us in an "unclean" state, we
+             do this first. Although if setting hook fails, we won't be clean if
+             there's more than one hook . */
+  size_t dehooked_count = 0;
+  for (size_t i = 0; i < ctx->hook_count; i++) {
+    if (strcmp(ctx->hooks[i].lib_name, lib_name) != 0) continue;
+    if (strcmp(ctx->hooks[i].name, name) != 0) continue;
+
+    dehooked_count++;
+  }
+
+  if (dehooked_count == 0) {
+    LOGE("No matching hook found for %s in library %s", name, lib_name);
+
+    return false;
+  }
+
+  struct plti_hook *new_hooks = NULL;
+  size_t new_hook_idx = 0;
+
+  if (dehooked_count != ctx->hook_count) {
+    new_hooks = malloc((ctx->hook_count - dehooked_count) * sizeof(struct plti_hook));
+    if (!new_hooks) {
+      LOGE("Failed to reallocate hooks array for removing hook %s in library %s", name, lib_name);
+
+      return false;
+    }
+  }
+
+  for (size_t i = 0; i < ctx->hook_count; i++) {
+    if (strcmp(ctx->hooks[i].lib_name, lib_name) != 0) goto unhook_add_hook;
+    if (strcmp(ctx->hooks[i].name, name) != 0) goto unhook_add_hook;
+
+    uintptr_t plt_addr = (uintptr_t)ctx->hooks[i].address;
+    if (!plt_addr) continue;
+
+    if (!plti_internal_set_got_entry(target_image, plt_addr, original_callback)) {
+      LOGE("Failed to restore GOT entry for PLT hook at 0x%" PRIxPTR, plt_addr);
+
+      return false;
+    }
+
+    continue;
+
+    /* INFO: If it doesn't match, add to the new hooks array */
+    unhook_add_hook:
+      new_hooks[new_hook_idx].lib_name = ctx->hooks[i].lib_name;
+      new_hooks[new_hook_idx].name = ctx->hooks[i].name;
+      new_hooks[new_hook_idx].address = ctx->hooks[i].address;
+
+      new_hook_idx++;
+  }
+
+  free(ctx->hooks);
+  if (dehooked_count == ctx->hook_count) ctx->hooks = NULL;
+  else ctx->hooks = new_hooks;
+
+  ctx->hook_count = new_hook_idx;
+
+  return true;
 }
 
-bool plti_remove_hook_by_prefix(struct plti *ctx, const char *lib_name, const char *name_prefix, void **backup) {
-  if (!backup || *backup == NULL) {
-    LOGE("Backup pointer is NULL for hook with prefix %s in library %s", name_prefix, lib_name);
+bool plti_remove_hook(struct plti *ctx, const char *lib_name, const char *name, void **original_callback) {
+  if (!original_callback || *original_callback == NULL) {
+    LOGE("Original callback pointer is NULL for hook %s in library %s", name, lib_name);
 
     return false;
   }
 
-  return plti_add_hook_by_prefix(ctx, lib_name, name_prefix, *backup, NULL);
+  return plti_internal_remove_hook(ctx, lib_name, name, *original_callback);
+}
+
+bool plti_remove_hook_by_prefix(struct plti *ctx, const char *lib_name, const char *name_prefix, void **original_callback) {
+  return plti_internal_remove_hook(ctx, lib_name, name_prefix, *original_callback);
 }
 
 bool plti_deinit(struct plti *ctx) {
   for (size_t i = 0; i < ctx->elf_image_count; i++) {
     free((void *)ctx->elf_infos[i].path);
+  }
+
+  for (size_t i = 0; i < ctx->hook_count; i++) {
+    free((void *)ctx->hooks[i].lib_name);
+    free((void *)ctx->hooks[i].name);
   }
 
   free(ctx->elf_infos);
