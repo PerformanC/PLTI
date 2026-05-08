@@ -8,6 +8,8 @@
 #include <string.h>
 #include <sys/mman.h>
 
+#include <unistd.h>
+
 #include "logging.h"
 
 #ifndef PT_GNU_RELRO
@@ -611,4 +613,26 @@ size_t elfutil_find_plt_addr(const struct elf_image *elf, const char *name, uint
 
 size_t elfutil_find_plt_addr_by_prefix(const struct elf_image *elf, const char *name_prefix, uintptr_t **out_addrs) {
   return elfutil_internal_find_plt_addr(elf, name_prefix, true, out_addrs);
+}
+
+bool elfutil_get_vma_boundaries(const struct elf_image *elf, uintptr_t addr, uintptr_t *vma_start, size_t *vma_len) {
+  if (!elf || !elf->header_ || !elf->program_header_ || elf->header_->e_phnum == 0) return false;
+
+  uintptr_t target = addr;
+  size_t page_size = getpagesize();
+  for (size_t i = 0; i < elf->header_->e_phnum; i++) {
+    const ElfW(Phdr) *ph = &elf->program_header_[i];
+    if ((ph->p_type != PT_GNU_RELRO && ph->p_type != PT_LOAD) || ph->p_memsz == 0) continue;
+
+    uintptr_t s = ((uintptr_t)elf->bias_addr_ + ph->p_vaddr) & ~(page_size - 1);
+    uintptr_t e = ((uintptr_t)elf->bias_addr_ + ph->p_vaddr + ph->p_memsz + page_size - 1) & ~(page_size - 1);
+
+    if (target < s || target >= e) continue;
+
+    if (vma_start) *vma_start = s;
+    if (vma_len) *vma_len = e - s;
+    if (ph->p_type == PT_GNU_RELRO) break;
+  }
+
+  return (vma_start && *vma_start != 0);
 }
