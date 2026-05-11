@@ -550,18 +550,8 @@ bool plti_deinit(struct plti *ctx) {
   for (size_t i = 0; i < ctx->elf_image_count; i++) {
     struct elf_info *info = &ctx->elf_infos[i];
 
-    for (size_t j = 0; j < info->stashed_vma_count; j++) {
-      struct stashed_vma *vma = &info->stashed_vmas[j];
-
-      if (!mremap((void *)vma->backup_addr, vma->len, vma->len, MREMAP_FIXED | MREMAP_MAYMOVE, (void *)vma->original_addr)) {
-        LOGE("Failed to restore original VMA for library %s", info->path);
-
-        munmap((void *)vma->backup_addr, vma->len);
-      }
-    }
-
     free(info->stashed_vmas);
-    free((void *)ctx->elf_infos[i].path);
+    free((void *)info->path);
   }
 
   for (size_t i = 0; i < ctx->hook_count; i++) {
