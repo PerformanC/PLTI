@@ -519,9 +519,52 @@ static bool plti_internal_remove_hook(struct plti *ctx, const char *lib_name, co
       }
   }
 
-  free(ctx->hooks);
+  struct plti_hook *old_hooks = ctx->hooks;
   ctx->hooks = new_hooks;
   ctx->hook_count = new_hook_idx;
+
+  for (size_t i = 0; i < target_info->stashed_vma_count; ) {
+    struct stashed_vma *stash = &target_info->stashed_vmas[i];
+    uintptr_t vma_end = stash->original_addr + stash->len;
+
+    /* INFO: A library's VMA is shared across all hooks for that library. We can only
+               restore the VMA if no other hooks are using it. */
+    bool is_still_hooked = false;
+
+    for (size_t j = 0; j < ctx->hook_count; j++) {
+      uintptr_t hook_addr = (uintptr_t)ctx->hooks[j].address;
+      if (hook_addr < stash->original_addr || hook_addr >= vma_end) continue;
+
+      is_still_hooked = true;
+
+      break;
+    }
+
+    if (is_still_hooked) {
+      i++;
+
+      continue;
+    }
+
+    if (mremap((void *)stash->backup_addr, stash->len, stash->len, MREMAP_FIXED | MREMAP_MAYMOVE, (void *)stash->original_addr) == MAP_FAILED) {
+      LOGE("Failed to restore original VMA for library %s", target_info->path);
+
+      free(old_hooks);
+
+      return false;
+    }
+
+    if (i + 1 < target_info->stashed_vma_count)
+      memmove(&target_info->stashed_vmas[i], &target_info->stashed_vmas[i + 1], (target_info->stashed_vma_count - i - 1) * sizeof(struct stashed_vma));
+
+    target_info->stashed_vma_count--;
+    if (target_info->stashed_vma_count == 0) {
+      free(target_info->stashed_vmas);
+      target_info->stashed_vmas = NULL;
+    }
+  }
+
+  free(old_hooks);
 
   return true;
 }
