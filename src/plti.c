@@ -259,7 +259,9 @@ static bool plti_internal_set_got_entry(struct elf_info *info, uintptr_t got_add
   if (!stash) {
     /* INFO: Don't call LOGE -- or else it will try to access GOT while it's being modified */
     void *hint = find_high_backup_hint(vma_len);
-    void *backup_addr = mmap(hint, vma_len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    void *backup_addr = MAP_FAILED;
+    if (hint)
+      backup_addr = mmap(hint, vma_len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (backup_addr == MAP_FAILED) {
       backup_addr = mmap(NULL, vma_len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (backup_addr == MAP_FAILED) {
