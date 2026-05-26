@@ -405,8 +405,10 @@ static bool elfutil_unpack_android_relocs(const struct elf_image *elf, struct an
         r_addend += sleb128_decode(&decoder);
 
       if (out_index >= num_relocs) {
-        LOGE("Android reloc: out_index exceeded num_relocs");
+        LOGE("out_index exceeded num_relocs");
+
         free(entries);
+
         return false;
       }
 
