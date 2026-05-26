@@ -333,8 +333,9 @@ static bool elfutil_unpack_android_relocs(const struct elf_image *elf, struct an
   struct sleb128_decoder decoder;
   sleb128_decoder_init(&decoder, (const uint8_t *)elf->rel_android_, elf->rel_android_size_);
 
-  uint64_t num_relocs = sleb128_decode(&decoder);
-  if (num_relocs <= 0) return false;
+  int64_t num_relocs_signed = sleb128_decode(&decoder);
+  if (num_relocs_signed <= 0) return false;
+  uint64_t num_relocs = (uint64_t)num_relocs_signed;
 
   size_t out_index = 0;
   void *entries = calloc(num_relocs, elf->rel_android_is_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel)));
