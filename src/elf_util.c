@@ -80,12 +80,18 @@ static int64_t sleb128_decode(struct sleb128_decoder *decoder) {
   const size_t size = sizeof(int64_t) * CHAR_BIT;
 
   do {
-    if (decoder->current >= decoder->end)
-      LOGF("Failed to decode SLEB128: buffer overrun");
+    if (decoder->current >= decoder->end) {
+	    LOGF("Failed to decode SLEB128: buffer overrun");
+	    return 0;
+	}
 
     byte = *decoder->current++;
     value |= ((int64_t)(byte & 0x7F)) << shift;
     shift += 7;
+    if (shift > size) {
+	LOGF("SLEB128 shift overflow");
+	return 0;
+    }
   } while (byte & 0x80);
 
   if (shift < size && (byte & 0x40)) {
