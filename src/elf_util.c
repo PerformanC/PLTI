@@ -403,6 +403,12 @@ static bool elfutil_unpack_android_relocs(const struct elf_image *elf, struct an
       if (elf->rel_android_is_rela_ && group_flags_reloc == RELOCATION_GROUP_HAS_ADDEND_FLAG)
         r_addend += sleb128_decode(&decoder);
 
+      if (out_index >= num_relocs) {
+        LOGE("Android reloc: out_index exceeded num_relocs");
+        free(entries);
+        return false;
+      }
+
       if (elf->rel_android_is_rela_) {
         ElfW(Rela) *rela = (ElfW(Rela) *)entries;
         rela[out_index].r_offset = current_offset;
