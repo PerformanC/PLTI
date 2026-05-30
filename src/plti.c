@@ -9,11 +9,15 @@
 #include <sys/mman.h>
 #include <link.h>
 
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/socket.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "elf_util.h"
+#include "fd_utils.h"
 #include "logging.h"
 
 struct stashed_vma {
@@ -145,9 +149,9 @@ static void *page_start(uintptr_t addr) {
 /* INFO: If we allocate a VMA on a low address, we risk taking a place where the system
            would later use. This is a detection that the only fix is to use a high address. */
 static void *find_high_backup_hint(size_t needed_size) {
-  int pfd[2];
-  if (pipe(pfd) == -1) {
-    LOGE("Failed to create pipe for backup hint scan");
+  int sockets[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == -1) {
+    LOGE("Failed to create socket pair for backup hint scan");
 
     return NULL;
   }
@@ -156,56 +160,76 @@ static void *find_high_backup_hint(size_t needed_size) {
   if (pid == -1) {
     LOGE("Failed to fork for backup hint scan");
 
-    close(pfd[0]);
-    close(pfd[1]);
+    close(sockets[0]);
+    close(sockets[1]);
 
     return NULL;
   }
 
   if (pid == 0) {
-    close(pfd[0]);
+    close(sockets[0]);
 
-    uintptr_t hint = 0;
-    FILE *fp = fopen("/proc/self/maps", "r");
-    if (fp) {
-      char line[512];
-      uintptr_t prev_end = 0;
-      uintptr_t best = 0;
-      uintptr_t pagesize = (uintptr_t)getpagesize();
-      size_t size = (needed_size + pagesize - 1) & ~(pagesize - 1);
+    int maps_fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+    if (maps_fd != -1) {
+      fdutil_write_fd(sockets[1], maps_fd);
+      close(maps_fd);
 
-      while (fgets(line, sizeof(line), fp)) {
-        uintptr_t start, end;
-        if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR, &start, &end) == 2) {
-          if (prev_end != 0 && start > prev_end && (start - prev_end) >= size)
-            best = prev_end;
-
-          if (end > prev_end) prev_end = end;
-        }
-      }
-      fclose(fp);
-
-      if (best != 0) hint = (best + pagesize - 1) & ~(pagesize - 1);
+      char done = 0;
+      read(sockets[1], &done, sizeof(done));
     }
 
-    write(pfd[1], &hint, sizeof(hint));
-    close(pfd[1]);
+    close(sockets[1]);
     _exit(0);
   }
 
-  close(pfd[1]);
+  close(sockets[1]);
 
-  uintptr_t hint = 0;
-  if (read(pfd[0], &hint, sizeof(hint)) != sizeof(hint)) {
-    LOGE("Failed to read backup hint from child");
+  int maps_fd = fdutil_read_fd(sockets[0]);
+  if (maps_fd == -1) {
+    LOGE("Failed to read backup hint scan fd from child");
 
-    hint = 0;
+    close(sockets[0]);
+    waitpid(pid, NULL, 0);
+
+    return NULL;
   }
 
-  close(pfd[0]);
+  FILE *fp = fdopen(maps_fd, "r");
+  if (!fp) {
+    LOGE("Failed to open backup hint scan fd");
+
+    close(maps_fd);
+    close(sockets[0]);
+    waitpid(pid, NULL, 0);
+
+    return NULL;
+  }
+
+  uintptr_t pagesize = (uintptr_t)getpagesize();
+  size_t size = (needed_size + pagesize - 1) & ~(pagesize - 1);
+
+  uintptr_t prev_end = 0;
+  uintptr_t best = 0;
+
+  char line[512];
+  while (fgets(line, sizeof(line), fp)) {
+    uintptr_t start, end;
+    if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR, &start, &end) != 2) continue;
+
+    if (prev_end != 0 && start > prev_end && (start - prev_end) >= size)
+      best = prev_end;
+
+    if (end > prev_end) prev_end = end;
+  }
+
+  fclose(fp);
+
+  char done = 1;
+  write(sockets[0], &done, sizeof(done));
+  close(sockets[0]);
   waitpid(pid, NULL, 0);
 
-  return (void *)hint;
+  return best != 0 ? (void *)((best + pagesize - 1) & ~(pagesize - 1)) : NULL;
 }
 
 static bool plti_internal_set_got_entry(struct elf_info *info, uintptr_t got_addr, void *new_val) {
