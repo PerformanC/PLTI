@@ -276,10 +276,6 @@ static bool plti_internal_set_got_entry(struct elf_info *info, uintptr_t got_add
     break;
   }
 
-  /* INFO: Early exit if VMA is already anonymous (detected via msync failure) */
-  if (!stash && (msync((void *)vma_start, vma_len, MS_ASYNC) == -1 && errno == ENOMEM))
-    goto apply_hook;
-
   if (!stash) {
     /* INFO: Don't call LOGE -- or else it will try to access GOT while it's being modified */
     void *hint = find_high_backup_hint(vma_len);
