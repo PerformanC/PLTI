@@ -342,16 +342,18 @@ static bool plti_internal_set_got_entry(struct elf_info *info, uintptr_t got_add
     return true;
 }
 
-static bool plti_internal_add_hook(struct plti *ctx, const char *lib_name, const char *name, bool by_prefix, void *new_callback, void **backup) {
-  struct elf_info *target_info = NULL;
+static struct elf_info *plti_find_elf_info(struct plti *ctx, const char *lib_name) {
   for (size_t i = 0; i < ctx->elf_image_count; i++) {
     if (!strstr(ctx->elf_infos[i].path, lib_name)) continue;
 
-    target_info = &ctx->elf_infos[i];
-
-    break;
+    return &ctx->elf_infos[i];
   }
 
+  return NULL;
+}
+
+static bool plti_internal_add_hook(struct plti *ctx, const char *lib_name, const char *name, bool by_prefix, void *new_callback, void **backup) {
+  struct elf_info *target_info = plti_find_elf_info(ctx, lib_name);
   if (!target_info) {
     LOGE("Failed to find ELF image for library for hook %s: %s", name, lib_name);
 
@@ -467,15 +469,7 @@ bool plti_add_hook_by_prefix(struct plti *ctx, const char *lib_name, const char 
 /* TODO: Perhaps: When registering hooks by prefix, add their full name to the array, and de-registering will only
            remove those targets. For now, removing any that matches so, even manual, is very acceptable. */
 static bool plti_internal_remove_hook(struct plti *ctx, const char *lib_name, const char *name, void *original_callback) {
-  struct elf_info *target_info = NULL;
-  for (size_t i = 0; i < ctx->elf_image_count; i++) {
-    if (!strstr(ctx->elf_infos[i].path, lib_name)) continue;
-
-    target_info = &ctx->elf_infos[i];
-
-    break;
-  }
-
+  struct elf_info *target_info = plti_find_elf_info(ctx, lib_name);
   if (!target_info) {
     LOGE("Failed to find ELF image for library for removing hook %s: %s", name, lib_name);
 
