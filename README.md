@@ -58,6 +58,7 @@ It is mandatory to follow the PerformanC's [contribution guidelines](https://git
 ## Projects using PLTI
 
 - [ReZygisk](https://github.com/PerformanC/ReZygisk): Transparent Zygisk implementation
+- [ZNNext](https://github.com/VeryBaaad/ZNNext): A from-scratch, standalone implementation of the Zygisk Next module
 
 ## License
 
