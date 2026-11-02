@@ -34,7 +34,7 @@ out ?= build/$(BUILD_TYPE)/$(ARCH)
 
 CFLAGS = $(CFLAGS_$(BUILD_TYPE))
 
-SRCS = src/plti.c src/elf_util.c src/fd_utils.c
+SRCS = src/plti.c src/elf_util.c
 OBJS = $(patsubst src/%.c,$(out)/%.o,$(SRCS))
 DEPS = $(OBJS:.o=.d)
 STATIC_LIB = $(out)/libplti.a

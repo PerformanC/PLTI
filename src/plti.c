@@ -7,17 +7,12 @@
 #include <inttypes.h>
 #include <sys/types.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <link.h>
 
-#include <fcntl.h>
-#include <stdio.h>
-#include <sys/socket.h>
-#include <sys/prctl.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include "elf_util.h"
-#include "fd_utils.h"
 #include "logging.h"
 
 struct stashed_vma {
@@ -146,90 +141,53 @@ static void *page_start(uintptr_t addr) {
   return (void *)(addr & ~(getpagesize() - 1));
 }
 
-/* INFO: If we allocate a VMA on a low address, we risk taking a place where the system
-           would later use. This is a detection that the only fix is to use a high address. */
-static void *find_high_backup_hint(size_t needed_size) {
-  int sockets[2];
-  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == -1) {
-    LOGE("Failed to create socket pair for backup hint scan");
+/* INFO: Reserve size bytes in the highest free place below the stack, so we never take a
+           place the system would later use, which would create a gap, a detection.
 
-    return NULL;
+         An address given to mmap without MAP_FIXED is only a hint, so we accept only our
+           own, stepping it down one mapping at a time until it is taken, meaning it is free.
+*/
+static void *reserve_high_memory(size_t size) {
+  struct rlimit stack_limit;
+  if (getrlimit(RLIMIT_STACK, &stack_limit) == -1 || stack_limit.rlim_cur == RLIM_INFINITY)
+    return MAP_FAILED;
+
+  char here;
+  uintptr_t hint = (uintptr_t)page_start((uintptr_t)&here) - (uintptr_t)stack_limit.rlim_cur;
+
+  /* INFO: The address of a local stands at or above our stack pointer, and our stack can
+             never reach below its own limit: The kernel keeps stack_guard_gap, the gap it
+             enforces between the expanding stack (and other mappings). The default is 256 pages.
+
+     SOURCES:
+      - https://github.com/torvalds/linux/blob/14a5c975b1382225e283c867bb6d173cf90233cc/mm/mmap.c#L955
+  */
+  size_t stack_guard_gap = (size_t)getpagesize() * 256;
+
+  size_t map_size = (size_t)page_start(size + getpagesize() - 1);
+  hint -= stack_guard_gap + map_size;
+
+  /* INFO: To avoid reading /proc/self/maps, which causes detections, and still be able
+             to get a high address, we utilize mmap to probe.
+
+           We start off at a high address, and then we ask the kernel to allocate a VMA there.
+             If the kernel allocates somewhere different from where we wanted (hint), then
+             it is occupied, so we try a bit lower address next, until it gives a VMA
+             exactly where we want. */
+  uintptr_t lowest = 0;
+  while (hint > lowest) {
+    void *base = mmap((void *)hint, map_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) return base;
+
+    if ((uintptr_t)base == hint) return base;
+
+    if (!lowest) lowest = (uintptr_t)base;
+    munmap(base, map_size);
+
+    hint -= map_size;
   }
 
-  pid_t pid = fork();
-  if (pid == -1) {
-    LOGE("Failed to fork for backup hint scan");
-
-    close(sockets[0]);
-    close(sockets[1]);
-
-    return NULL;
-  }
-
-  if (pid == 0) {
-    close(sockets[0]);
-
-    int maps_fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
-    if (maps_fd != -1) {
-      fdutil_write_fd(sockets[1], maps_fd);
-      close(maps_fd);
-
-      char done = 0;
-      read(sockets[1], &done, sizeof(done));
-    }
-
-    close(sockets[1]);
-    _exit(0);
-  }
-
-  close(sockets[1]);
-
-  int maps_fd = fdutil_read_fd(sockets[0]);
-  if (maps_fd == -1) {
-    LOGE("Failed to read backup hint scan fd from child");
-
-    close(sockets[0]);
-    waitpid(pid, NULL, 0);
-
-    return NULL;
-  }
-
-  FILE *fp = fdopen(maps_fd, "r");
-  if (!fp) {
-    LOGE("Failed to open backup hint scan fd");
-
-    close(maps_fd);
-    close(sockets[0]);
-    waitpid(pid, NULL, 0);
-
-    return NULL;
-  }
-
-  uintptr_t pagesize = (uintptr_t)getpagesize();
-  size_t size = (needed_size + pagesize - 1) & ~(pagesize - 1);
-
-  uintptr_t prev_end = 0;
-  uintptr_t best = 0;
-
-  char line[512];
-  while (fgets(line, sizeof(line), fp)) {
-    uintptr_t start, end;
-    if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR, &start, &end) != 2) continue;
-
-    if (prev_end != 0 && start > prev_end && (start - prev_end) >= size)
-      best = prev_end;
-
-    if (end > prev_end) prev_end = end;
-  }
-
-  fclose(fp);
-
-  char done = 1;
-  write(sockets[0], &done, sizeof(done));
-  close(sockets[0]);
-  waitpid(pid, NULL, 0);
-
-  return best != 0 ? (void *)((best + pagesize - 1) & ~(pagesize - 1)) : NULL;
+  return MAP_FAILED;
 }
 
 static bool plti_internal_set_got_entry(struct elf_info *info, uintptr_t got_addr, void *new_val) {
@@ -278,8 +236,7 @@ static bool plti_internal_set_got_entry(struct elf_info *info, uintptr_t got_add
 
   if (!stash) {
     /* INFO: Don't call LOGE -- or else it will try to access GOT while it's being modified */
-    void *hint = find_high_backup_hint(vma_len);
-    void *backup_addr = mmap(hint, vma_len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    void *backup_addr = reserve_high_memory(vma_len);
     if (backup_addr == MAP_FAILED) {
       backup_addr = mmap(NULL, vma_len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (backup_addr == MAP_FAILED) {

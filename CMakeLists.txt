@@ -7,7 +7,6 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 add_library(plti STATIC
   src/elf_util.c
-  src/fd_utils.c
   src/plti.c
 )
 
