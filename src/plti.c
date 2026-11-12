@@ -483,6 +483,9 @@ static bool plti_internal_remove_hook(struct plti *ctx, const char *lib_name, co
       return false;
     }
 
+    free((void *)ctx->hooks[i].lib_name);
+    free((void *)ctx->hooks[i].name);
+
     continue;
 
     /* INFO: If it doesn't match, add to the new hooks array */
