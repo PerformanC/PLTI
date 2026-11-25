@@ -4,6 +4,9 @@
 !.github/**
 !src/
 !src/**
+!tests/
+!tests/**
+tests/**/build/
 !.gitignore
 !CMakeLists.txt
 !LICENSE
