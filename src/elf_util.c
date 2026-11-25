@@ -636,3 +636,22 @@ bool elfutil_get_vma_boundaries(const struct elf_image *elf, uintptr_t addr, uin
 
   return (vma_start && *vma_start != 0);
 }
+
+bool elfutil_get_file_offset(const struct elf_image *elf, uintptr_t addr, off_t *out_offset) {
+  if (!elf || !out_offset || !elf->header_ || !elf->program_header_ || elf->header_->e_phnum == 0) return false;
+
+  intptr_t page_size = (intptr_t)getpagesize();
+  for (size_t i = 0; i < elf->header_->e_phnum; i++) {
+    const ElfW(Phdr) *ph = &elf->program_header_[i];
+    if (ph->p_type != PT_LOAD || ph->p_filesz == 0) continue;
+
+    intptr_t offset_in_segment = (intptr_t)(addr - (elf->bias_addr_ + ph->p_vaddr));
+    if (offset_in_segment <= -page_size || offset_in_segment >= (intptr_t)ph->p_filesz) continue;
+
+    *out_offset = (off_t)ph->p_offset + offset_in_segment;
+
+    return true;
+  }
+
+  return false;
+}

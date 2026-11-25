@@ -11,7 +11,7 @@
     #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  "PLTI", __VA_ARGS__)
     #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "PLTI", __VA_ARGS__)
     #define LOGF(...) __android_log_print(ANDROID_LOG_FATAL, "PLTI", __VA_ARGS__)
-    #define PLOGE(fmt, args...) LOGE(fmt " failed with %d: %s", ##args, errno, strerror(errno))
+    #define PLOGE(fmt, ...) LOGE(fmt " failed with %d: %s", __VA_ARGS__, errno, strerror(errno))
 #else
     #define LOGI(...) ((void)0)
     #define LOGD(...) ((void)0)

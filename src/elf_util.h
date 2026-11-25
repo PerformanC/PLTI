@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/types.h>
 #include <link.h>
 
 struct elf_image {
@@ -54,5 +55,7 @@ size_t elfutil_find_plt_addr_by_prefix(const struct elf_image *elf, const char *
 bool elfutil_get_addr_protection(const struct elf_image *elf, uintptr_t addr, int *out_prot);
 
 bool elfutil_get_vma_boundaries(const struct elf_image *elf, uintptr_t addr, uintptr_t *vma_start, size_t *vma_len);
+
+bool elfutil_get_file_offset(const struct elf_image *elf, uintptr_t addr, off_t *out_offset);
 
 #endif /* PLTI_ELF_UTIL_H */
