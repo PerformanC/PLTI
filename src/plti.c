@@ -2,10 +2,13 @@
 #include "plti.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <fcntl.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <link.h>
@@ -17,7 +20,6 @@
 
 struct stashed_vma {
   uintptr_t original_addr;
-  uintptr_t backup_addr;
   size_t len;
   int original_prot;
 };
@@ -190,6 +192,225 @@ static void *reserve_high_memory(size_t size) {
   return MAP_FAILED;
 }
 
+static void *map_high(size_t size) {
+  void *addr = reserve_high_memory(size);
+  if (addr == MAP_FAILED) return mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+  if (mprotect(addr, size, PROT_READ | PROT_WRITE) == -1) {
+    PLOGE("Failed to make the memory reserved for a VMA of %zu bytes writable", size);
+
+    munmap(addr, size);
+
+    return MAP_FAILED;
+  }
+
+  return addr;
+}
+
+/* INFO: The threads of the process read the range while it is replaced, so the copy is ready
+           before the original is gone, and mremap(2) swaps both in a single call */
+static bool replace_vma_with_copy(uintptr_t addr, size_t len, int prot) {
+  void *copy = map_high(len);
+  if (copy == MAP_FAILED) {
+    PLOGE("Failed to allocate a copy of the VMA at 0x%" PRIxPTR, addr);
+
+    return false;
+  }
+
+  memcpy(copy, (const void *)addr, len);
+
+  bool replaced = false;
+  if (mprotect(copy, len, prot) == -1) {
+    PLOGE("Failed to give the copy of the VMA at 0x%" PRIxPTR " its protection", addr);
+  } else if (mremap(copy, len, len, MREMAP_FIXED | MREMAP_MAYMOVE, (void *)addr) == MAP_FAILED) {
+    PLOGE("Failed to move the copy of the VMA to 0x%" PRIxPTR, addr);
+  } else {
+    replaced = true;
+  }
+
+  if (!replaced) munmap(copy, len);
+
+  return replaced;
+}
+
+#define ZIP_EOCD_SIGNATURE 0x06054b50
+#define ZIP_EOCD_SIZE 22
+#define ZIP_EOCD_MAX_COMMENT 65535
+#define ZIP_CENTRAL_DIRECTORY_HEADER_SIGNATURE 0x02014b50
+#define ZIP_CENTRAL_DIRECTORY_HEADER_SIZE 46
+#define ZIP_LOCAL_HEADER_SIGNATURE 0x04034b50
+#define ZIP_LOCAL_HEADER_SIZE 30
+
+static uint16_t read_u16(const unsigned char *bytes) {
+  return (uint16_t)(bytes[0] | (bytes[1] << 8));
+}
+
+static uint32_t read_u32(const unsigned char *bytes) {
+  return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+}
+
+static bool read_fully(int fd, void *buf, size_t size, off_t offset) {
+  unsigned char *next = (unsigned char *)buf;
+
+  while (size > 0) {
+    ssize_t count = pread(fd, next, size, offset);
+    if (count <= 0) return false;
+
+    next += count;
+    size -= (size_t)count;
+    offset += count;
+  }
+
+  return true;
+}
+
+/* INFO: The dynamic linker maps an entry of an APK as it is, so only a stored one can be what
+           was mapped */
+static bool find_zip_entry(int fd, const char *name, off_t file_size, off_t *out_offset) {
+  if (file_size < ZIP_EOCD_SIZE) return false;
+
+  off_t tail_size = file_size < (off_t)(ZIP_EOCD_MAX_COMMENT + ZIP_EOCD_SIZE) ? file_size : (off_t)(ZIP_EOCD_MAX_COMMENT + ZIP_EOCD_SIZE);
+  unsigned char *tail = (unsigned char *)malloc((size_t)tail_size);
+  if (!tail) return false;
+
+  bool found = false;
+  if (!read_fully(fd, tail, (size_t)tail_size, file_size - tail_size)) goto free_tail;
+
+  const unsigned char *eocd = NULL;
+  for (size_t i = (size_t)tail_size - ZIP_EOCD_SIZE + 1; i-- > 0;) {
+    if (read_u32(tail + i) != ZIP_EOCD_SIGNATURE) continue;
+    if (read_u16(tail + i + 20) != (uint16_t)((size_t)tail_size - i - ZIP_EOCD_SIZE)) continue;
+
+    eocd = tail + i;
+
+    break;
+  }
+  if (!eocd) goto free_tail;
+
+  off_t directory_size = (off_t)read_u32(eocd + 12);
+  off_t directory_offset = (off_t)read_u32(eocd + 16);
+  if (directory_size < ZIP_CENTRAL_DIRECTORY_HEADER_SIZE || directory_offset > file_size - directory_size) goto free_tail;
+
+  unsigned char *directory = (unsigned char *)malloc((size_t)directory_size);
+  if (!directory) goto free_tail;
+
+  if (!read_fully(fd, directory, (size_t)directory_size, directory_offset)) goto free_directory;
+
+  size_t name_size = strlen(name);
+  for (size_t i = 0; ZIP_CENTRAL_DIRECTORY_HEADER_SIZE <= (size_t)directory_size - i;) {
+    const unsigned char *entry = directory + i;
+    size_t entry_size = ZIP_CENTRAL_DIRECTORY_HEADER_SIZE + (size_t)read_u16(entry + 28) + (size_t)read_u16(entry + 30) + (size_t)read_u16(entry + 32);
+
+    if (read_u32(entry) != ZIP_CENTRAL_DIRECTORY_HEADER_SIGNATURE || entry_size > (size_t)directory_size - i) break;
+
+    if (read_u16(entry + 10) == 0 && read_u16(entry + 28) == name_size && memcmp(entry + ZIP_CENTRAL_DIRECTORY_HEADER_SIZE, name, name_size) == 0) {
+      unsigned char header[ZIP_LOCAL_HEADER_SIZE];
+      off_t header_offset = (off_t)read_u32(entry + 42);
+
+      if (read_fully(fd, header, sizeof(header), header_offset) && read_u32(header) == ZIP_LOCAL_HEADER_SIGNATURE) {
+        *out_offset = header_offset + ZIP_LOCAL_HEADER_SIZE + (off_t)read_u16(header + 26) + (off_t)read_u16(header + 28);
+        found = true;
+      }
+
+      break;
+    }
+
+    i += entry_size;
+  }
+
+  free_directory:
+    free(directory);
+
+  free_tail:
+    free(tail);
+
+  return found;
+}
+
+static bool open_library_file(const char *path, int *out_fd, off_t *out_start, off_t *out_file_size) {
+  /* INFO: The dynamic linker reports a library inside an archive, as a library of an application
+             in its APK, as "<archive>!<entry>", and the entry is what was mapped */
+  const char *entry = strchr(path, '!');
+  char *archive = NULL;
+  if (entry) {
+    archive = (char *)malloc((size_t)(entry - path) + 1);
+    if (!archive) return false;
+
+    memcpy(archive, path, (size_t)(entry - path));
+    archive[entry - path] = '\0';
+  }
+
+  int fd = open(archive ? archive : path, O_RDONLY | O_CLOEXEC);
+  free(archive);
+
+  if (fd == -1) return false;
+
+  struct stat status;
+  off_t start = 0;
+  bool opened = fstat(fd, &status) == 0 && S_ISREG(status.st_mode);
+  if (opened && entry) {
+    opened = find_zip_entry(fd, entry[1] == '/' ? entry + 2 : entry + 1, status.st_size, &start);
+  }
+
+  if (!opened) {
+    close(fd);
+
+    return false;
+  }
+
+  *out_fd = fd;
+  *out_start = start;
+  *out_file_size = status.st_size;
+
+  return true;
+}
+
+/* INFO: Only the pages the linker changed when loading the library, the relocations, are taken
+           from the copy: the other ones stay as the file provides them */
+static void restore_vma(struct elf_info *info, struct stashed_vma *stash) {
+  int fd = -1;
+  off_t start = 0, file_size = 0, offset = 0;
+  if (!open_library_file(info->path, &fd, &start, &file_size)) {
+    LOGD("Failed to open the file of library %s, leaving the VMA of its GOT anonymous", info->path);
+
+    return;
+  }
+
+  off_t page_size = (off_t)getpagesize();
+
+  /* INFO: A page that starts past the end of the file is a SIGBUS once touched */
+  bool mappable = elfutil_get_file_offset(&info->elf, stash->original_addr, &offset) && start + offset + (off_t)stash->len < file_size + page_size;
+
+  void *mapping = MAP_FAILED;
+  if (mappable) {
+    void *reserved = reserve_high_memory(stash->len);
+    if (reserved != MAP_FAILED) mapping = mmap(reserved, stash->len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, start + offset);
+
+    if (mapping == MAP_FAILED) mapping = mmap(NULL, stash->len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, start + offset);
+  }
+
+  close(fd);
+
+  if (mapping == MAP_FAILED) {
+    if (mappable) PLOGE("Failed to map the file of library %s where the VMA of its GOT is", info->path);
+    else LOGD("Failed to tell where the VMA of the GOT of library %s is in its file, leaving it anonymous", info->path);
+
+    return;
+  }
+
+  unsigned char *file = (unsigned char *)mapping;
+  const unsigned char *copy = (const unsigned char *)stash->original_addr;
+  for (size_t i = 0; (size_t)page_size <= stash->len - i; i += (size_t)page_size) {
+    if (memcmp(file + i, copy + i, (size_t)page_size) != 0) memcpy(file + i, copy + i, (size_t)page_size);
+  }
+
+  if (mprotect(mapping, stash->len, stash->original_prot) == -1 || mremap(mapping, stash->len, stash->len, MREMAP_FIXED | MREMAP_MAYMOVE, (void *)stash->original_addr) == MAP_FAILED) {
+    PLOGE("Failed to put the mapping of the file of library %s back in place", info->path);
+
+    munmap(mapping, stash->len);
+  }
+}
+
 static bool plti_internal_set_got_entry(struct elf_info *info, uintptr_t got_addr, void *new_val) {
   struct elf_image *elf = &info->elf;
   int restore_prot = 0;
@@ -216,6 +437,9 @@ static bool plti_internal_set_got_entry(struct elf_info *info, uintptr_t got_add
              library's VMA (r--p specifically) Private Dirty due to CoW being triggered. To
              avoid that, we will replace the whole VMA with an anonymous mapping,
              and stash the original VMA for later restoration.
+
+             The threads of the process read the range while it is replaced, so it can never
+             be left unmapped or zeroed: the copy is swapped in by a single call.
   */
   uintptr_t vma_start = 0;
   size_t vma_len = 0;
@@ -235,49 +459,22 @@ static bool plti_internal_set_got_entry(struct elf_info *info, uintptr_t got_add
   }
 
   if (!stash) {
-    /* INFO: Don't call LOGE -- or else it will try to access GOT while it's being modified */
-    void *backup_addr = reserve_high_memory(vma_len);
-    if (backup_addr == MAP_FAILED) {
-      backup_addr = mmap(NULL, vma_len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-      if (backup_addr == MAP_FAILED) {
-        LOGE("Failed to allocate backup memory for stashing VMA for library: %s", info->path);
-
-        return false;
-      }
-    }
-
-    if (mremap((void *)vma_start, vma_len, vma_len, MREMAP_FIXED | MREMAP_MAYMOVE, backup_addr) == MAP_FAILED)
-      goto fail_stash_mremap;
-
-    if (mmap((void *)vma_start, vma_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED)
-      goto fail_stash_mmap;
-
-    memmove((void *)vma_start, backup_addr, vma_len);
-
     struct stashed_vma *new_stashed = (struct stashed_vma *)realloc(info->stashed_vmas, (info->stashed_vma_count + 1) * sizeof(struct stashed_vma));
     if (!new_stashed) {
       LOGE("Failed to allocate memory for stashed VMAs for library: %s", info->path);
 
-      goto fail_stash;
+      return false;
     }
-
     info->stashed_vmas = new_stashed;
+
+    if (!replace_vma_with_copy(vma_start, vma_len, restore_prot)) return false;
+
     stash = &info->stashed_vmas[info->stashed_vma_count++];
     stash->original_addr = vma_start;
-    stash->backup_addr = (uintptr_t)backup_addr;
     stash->len = vma_len;
     stash->original_prot = restore_prot;
 
     goto apply_hook;
-
-    fail_stash:
-      munmap((void *)vma_start, vma_len);
-    fail_stash_mmap:
-      mremap(backup_addr, vma_len, vma_len, MREMAP_FIXED | MREMAP_MAYMOVE, (void *)vma_start);
-    fail_stash_mremap:
-      munmap(backup_addr, vma_len);
-
-      return false;
   }
 
   apply_hook:
@@ -526,13 +723,7 @@ static bool plti_internal_remove_hook(struct plti *ctx, const char *lib_name, co
       continue;
     }
 
-    if (mremap((void *)stash->backup_addr, stash->len, stash->len, MREMAP_FIXED | MREMAP_MAYMOVE, (void *)stash->original_addr) == MAP_FAILED) {
-      LOGE("Failed to restore original VMA for library %s", target_info->path);
-
-      free(old_hooks);
-
-      return false;
-    }
+    restore_vma(target_info, stash);
 
     if (i + 1 < target_info->stashed_vma_count)
       memmove(&target_info->stashed_vmas[i], &target_info->stashed_vmas[i + 1], (target_info->stashed_vma_count - i - 1) * sizeof(struct stashed_vma));
